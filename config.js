@@ -9,11 +9,6 @@
 // SECRET values (API keys, service keys) go in config.secret.json
 // which is git-ignored and NEVER committed.
 
-// Default placeholder config — overwritten when config.public.json loads
-const SUPABASE_CONFIG = {
-    url: 'YOUR_SUPABASE_URL_HERE',
-    anonKey: 'YOUR_SUPABASE_ANON_KEY_HERE'
-};
 
 // Load config.public.json and update SUPABASE_CONFIG
 fetch('config.public.json')
