@@ -132,6 +132,22 @@
                     </div>
                     <div class="search-results" id="rag-results"></div>
                 </div>
+
+                <!-- Panel 4: Compare all three modes -->
+                <div class="search-panel" id="compare-panel">
+                    <div class="panel-header">
+                        <h3>⚖️ Compare All Modes</h3>
+                        <span class="status-badge not-ready" id="compare-status">🔴 Not Ready</span>
+                    </div>
+                    <p class="panel-description">Run one query through keyword, semantic, and RAG side by side to see
+                        where they agree and where they differ.</p>
+                    <div class="panel-input">
+                        <input type="text" id="compare-input" placeholder="Enter a query to compare..."
+                            autocomplete="off" disabled />
+                        <button id="compare-btn" class="btn-primary" disabled>Compare</button>
+                    </div>
+                    <div class="search-results" id="compare-results"></div>
+                </div>
             </div>
         </div>
     </div>

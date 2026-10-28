@@ -84,6 +84,9 @@ const ragBtn = document.getElementById('rag-btn');
 const ragResults = document.getElementById('rag-results');
 const ragStatus = document.getElementById('rag-status');
 
+const compareInput = document.getElementById('compare-input');
+const compareBtn = document.getElementById('compare-btn');
+
 // ============================================
 // SETUP BANNER DETECTION
 // ============================================
@@ -349,6 +352,7 @@ async function checkSearchReadiness() {
             }
         }
         setSearchReady('semantic', semanticReady);
+        setSearchReady('compare', semanticReady);
 
         // --- 1 generate-answer call (only if semantic pipeline is ready) ---
         if (!semanticReady) {
@@ -368,6 +372,7 @@ async function checkSearchReadiness() {
         setSearchReady('keyword', false);
         setSearchReady('semantic', false);
         setSearchReady('rag', false);
+        setSearchReady('compare', false);
     } finally {
         readinessCheckRunning = false;
     }
@@ -415,16 +420,9 @@ async function keywordSearch() {
     clearResults('keyword');
 
     try {
-        // Search sentence_embeddings that contain the keyword (case-insensitive)
-        const { data, error } = await supabaseClient
-            .from('sentence_embeddings')
-            .select('text, talk_id, title, speaker, url')
-            .ilike('text', `%${query}%`)
-            .limit(20);
+        const data = await fetchKeywordMatches(query);
 
-        if (error) throw new Error(`Search failed: ${error.message}`);
-
-        if (!data || data.length === 0) {
+        if (data.length === 0) {
             showResults('keyword', '<div class="no-results">No results found. Try different keywords.</div>');
             return;
         }
@@ -459,6 +457,18 @@ async function keywordSearch() {
     } finally {
         showLoading(false);
     }
+}
+
+// Search sentence_embeddings that contain the keyword (case-insensitive)
+async function fetchKeywordMatches(query) {
+    const { data, error } = await supabaseClient
+        .from('sentence_embeddings')
+        .select('text, talk_id, title, speaker, url')
+        .ilike('text', `%${query}%`)
+        .limit(20);
+
+    if (error) throw new Error(`Search failed: ${error.message}`);
+    return data || [];
 }
 
 function highlightKeyword(text, keyword) {
@@ -577,6 +587,129 @@ async function askQuestion() {
     } finally {
         showLoading(false);
     }
+}
+
+// ============================================
+// COMPARE ALL MODES
+// ============================================
+
+// Runs one query through keyword, semantic, and RAG and shows them side by side.
+// RAG reuses the semantic results (same embedding, same retrieved sentences),
+// so the comparison isolates what the generation step adds.
+async function compareModes() {
+    const query = compareInput ? compareInput.value.trim() : '';
+    if (!query || !supabaseClient) return;
+
+    showLoading(true);
+    clearResults('compare');
+
+    const timed = async (fn) => {
+        const start = performance.now();
+        try {
+            return { value: await fn(), ms: performance.now() - start };
+        } catch (error) {
+            return { error, ms: performance.now() - start };
+        }
+    };
+
+    try {
+        const keywordPromise = timed(() => fetchKeywordMatches(query));
+        const semantic = await timed(async () => searchSentences(await getEmbedding(query)));
+
+        const rag = semantic.error
+            ? { error: new Error('Skipped because semantic search failed'), ms: 0 }
+            : await timed(async () => {
+                const topTalks = groupByTalk(semantic.value);
+                const enrichedTalks = await fetchFullTalkText(topTalks);
+                return { answer: await generateAnswer(query, enrichedTalks), topTalks };
+            });
+        // RAG's real cost includes the embedding + vector search it reused
+        if (!rag.error) rag.ms += semantic.ms;
+
+        const keyword = await keywordPromise;
+        showResults('compare', renderComparison(keyword, semantic, rag, query));
+    } finally {
+        showLoading(false);
+    }
+}
+
+// Unique talks in result order (first occurrence = best match for semantic results)
+function uniqueTalks(rows) {
+    const seen = new Map();
+    for (const row of rows) {
+        if (!seen.has(row.talk_id)) seen.set(row.talk_id, { ...row, matches: 0 });
+        seen.get(row.talk_id).matches++;
+    }
+    return [...seen.values()];
+}
+
+function renderComparison(keyword, semantic, rag, query) {
+    const keywordTalks = keyword.error ? [] : uniqueTalks(keyword.value);
+    const semanticTalks = semantic.error ? [] : uniqueTalks(semantic.value);
+    const ragTalks = rag.error ? [] : rag.value.topTalks;
+
+    const keywordIds = new Set(keywordTalks.map(t => t.talk_id));
+    const semanticIds = new Set(semanticTalks.map(t => t.talk_id));
+    const inBoth = semanticTalks.filter(t => keywordIds.has(t.talk_id));
+    const ragAlsoKeyword = ragTalks.filter(t => keywordIds.has(t.talk_id)).length;
+
+    const row = (name, result, talks, note) => `<tr>
+        <td>${name}</td>
+        <td>${(result.ms / 1000).toFixed(2)}s</td>
+        <td>${result.error ? '—' : talks.length}</td>
+        <td>${result.error ? `<span class="compare-error">${escapeHtml(result.error.message)}</span>` : note}</td>
+    </tr>`;
+
+    const topTitle = (talks) => talks.length ? escapeHtml(talks[0].title) : 'No matches';
+
+    let html = `<table class="compare-table">
+        <thead><tr><th>Mode</th><th>Time</th><th>Talks</th><th>Top result</th></tr></thead>
+        <tbody>
+            ${row('🔍 Keyword', keyword, keywordTalks, topTitle(keywordTalks))}
+            ${row('🧠 Semantic', semantic, semanticTalks, topTitle(semanticTalks))}
+            ${row('🤖 RAG', rag, ragTalks, `Answer from ${ragTalks.length} source talks`)}
+        </tbody>
+    </table>
+    <div class="compare-overlap">
+        ${inBoth.length} of ${semanticIds.size} semantic talks also contain the exact words "${escapeHtml(query)}".
+        ${rag.error ? '' : `${ragAlsoKeyword} of ${ragTalks.length} RAG sources would have been found by keyword search.`}
+    </div>`;
+
+    const talkCard = (talk, extra) => `<div class="result-card result-source">
+        <div class="result-card-header">
+            <div>
+                <div class="result-title"><a href="${escapeHtml(talk.url)}" target="_blank" class="result-title-link">${escapeHtml(talk.title)}</a></div>
+                <div class="result-speaker">by ${escapeHtml(talk.speaker)}</div>
+            </div>
+            ${extra}
+        </div>
+    </div>`;
+
+    const column = (title, result, body) => `<div class="compare-column">
+        <h4>${title}</h4>
+        ${result.error
+            ? `<div class="result-error">${escapeHtml(result.error.message)}</div>`
+            : body || '<div class="no-results">No results</div>'}
+    </div>`;
+
+    const keywordBody = keywordTalks.slice(0, 5)
+        .map(t => talkCard(t, `<span class="compare-count">${t.matches} hit${t.matches === 1 ? '' : 's'}</span>`))
+        .join('');
+    const semanticBody = semanticTalks.slice(0, 5)
+        .map(t => talkCard(t, similarityBadge(t.similarity)))
+        .join('');
+    const ragBody = rag.error ? '' : `<div class="result-card rag-answer">
+            <div class="result-sentences">${escapeHtml(rag.value.answer)}</div>
+        </div>
+        ${ragTalks.map(t => talkCard(t, similarityBadge(t.avgSimilarity))).join('')}`;
+
+    html += `<div class="compare-grid">
+        ${column('🔍 Keyword', keyword, keywordBody)}
+        ${column('🧠 Semantic', semantic, semanticBody)}
+        ${column('🤖 RAG', rag, ragBody)}
+    </div>`;
+
+    return html;
 }
 
 // ============================================
@@ -750,6 +883,12 @@ if (semanticInput) semanticInput.addEventListener('keypress', (e) => {
 if (ragBtn) ragBtn.addEventListener('click', askQuestion);
 if (ragInput) ragInput.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') askQuestion();
+});
+
+// Compare all modes
+if (compareBtn) compareBtn.addEventListener('click', compareModes);
+if (compareInput) compareInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') compareModes();
 });
 
 // ============================================
