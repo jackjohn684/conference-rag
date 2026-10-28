@@ -59,8 +59,15 @@ CREATE TABLE IF NOT EXISTS sentence_embeddings (
 );
 
 -- Create index for talk_id grouping
-CREATE INDEX IF NOT EXISTS sentence_embeddings_talk_id_idx 
+CREATE INDEX IF NOT EXISTS sentence_embeddings_talk_id_idx
 ON sentence_embeddings(talk_id);
+
+-- HNSW index for approximate nearest-neighbor search on embeddings.
+-- Without it, match_sentences() scans every row (~11s at 26k rows), which
+-- exceeds the authenticated role's 8s statement timeout.
+-- vector_cosine_ops must match the <=> (cosine distance) operator used below.
+CREATE INDEX IF NOT EXISTS sentence_embeddings_embedding_hnsw_idx
+ON sentence_embeddings USING hnsw (embedding vector_cosine_ops);
 
 -- Enable Row Level Security
 ALTER TABLE sentence_embeddings ENABLE ROW LEVEL SECURITY;
